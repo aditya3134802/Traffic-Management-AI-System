@@ -1,0 +1,1111 @@
+---
+# Namespace for ATMS Components
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traffic-management-system
+  labels:
+    name: traffic-management-system
+    part-of: atms
+    environment: production
+
+---
+# ConfigMap for general configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: atms-config
+  namespace: traffic-management-system
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  METRICS_ENABLED: "true"
+  TRACING_ENABLED: "true"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-broker:9092"
+  REDIS_HOST: "redis-cache"
+  REDIS_PORT: "6379"
+  API_BASE_URL: "https://api.traffic-management.example.com"
+  WEBSOCKET_BASE_URL: "wss://ws.traffic-management.example.com"
+  MAP_PROVIDER_API_URL: "https://maps.example.com/api/v1"
+  MAX_PREDICTION_HORIZON_MINUTES: "60"
+  SENSOR_DATA_RETENTION_DAYS: "90"
+  VIDEO_RETENTION_DAYS: "15"
+  DEFAULT_CITY_CENTER_LAT: "37.7749"
+  DEFAULT_CITY_CENTER_LON: "-122.4194"
+  DEFAULT_ZOOM_LEVEL: "12"
+
+---
+# Secret for sensitive credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: atms-secrets
+  namespace: traffic-management-system
+type: Opaque
+data:
+  POSTGRES_USER: cG9zdGdyZXM=  # postgres (base64)
+  POSTGRES_PASSWORD: UzNjdXIzUGFzc3cwcmQ=  # S3cur3Passw0rd (base64)
+  REDIS_PASSWORD: UjNkIXNQYXNzd29yZA==  # R3d!sPassword (base64)
+  JWT_SECRET: SkxIRFNBTEpLSEFTTEtKSEFTTEtKSEFTS0xKSEFTREtMSkhBU0xLSkhBU0w=  # Random JWT secret (base64)
+  API_KEY_MAPS: TWFwQVBJS2V5MTIzNDU=  # MapAPIKey12345 (base64)
+  ML_MODEL_STORAGE_KEY: TUxNb2RlbEFjY2Vzc0tleTEyMzQ1  # MLModelAccessKey12345 (base64)
+
+---
+# Traffic Core Engine Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-core-engine
+  namespace: traffic-management-system
+  labels:
+    app: traffic-core-engine
+    component: core
+    part-of: atms
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: traffic-core-engine
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 2
+  template:
+    metadata:
+      labels:
+        app: traffic-core-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+      - name: traffic-core-engine
+        image: atms/traffic-core-engine:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9100
+          name: metrics
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        envFrom:
+        - configMapRef:
+            name: atms-config
+        - secretRef:
+            name: atms-secrets
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: traffic-core-config
+          mountPath: /app/config
+        - name: traffic-models
+          mountPath: /app/models
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: traffic-core-config
+        configMap:
+          name: traffic-core-config
+      - name: traffic-models
+        persistentVolumeClaim:
+          claimName: traffic-models-pvc
+      - name: logs
+        emptyDir: {}
+
+---
+# Service for Traffic Core Engine
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-core-engine
+  namespace: traffic-management-system
+  labels:
+    app: traffic-core-engine
+    component: core
+    part-of: atms
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9100"
+spec:
+  selector:
+    app: traffic-core-engine
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+  type: ClusterIP
+
+---
+# API Gateway Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: traffic-management-system
+  labels:
+    app: api-gateway
+    component: api
+    part-of: atms
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 2
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+      - name: api-gateway
+        image: atms/api-gateway:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9100
+          name: metrics
+        resources:
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: atms-config
+        - secretRef:
+            name: atms-secrets
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: api-gateway-config
+          mountPath: /app/config
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: api-gateway-config
+        configMap:
+          name: api-gateway-config
+      - name: logs
+        emptyDir: {}
+
+---
+# Service for API Gateway
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: traffic-management-system
+  labels:
+    app: api-gateway
+    component: api
+    part-of: atms
+spec:
+  selector:
+    app: api-gateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+  type: ClusterIP
+
+---
+# Ingress for API Gateway
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway-ingress
+  namespace: traffic-management-system
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - api.traffic-management.example.com
+    secretName: traffic-management-tls
+  rules:
+  - host: api.traffic-management.example.com
+    http:
+      paths:
+      - path: /(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              name: http
+
+---
+# Traffic Prediction Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-prediction
+  namespace: traffic-management-system
+  labels:
+    app: traffic-prediction
+    component: ai
+    part-of: atms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: traffic-prediction
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: traffic-prediction
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+      - name: traffic-prediction
+        image: atms/traffic-prediction:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9100
+          name: metrics
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+        envFrom:
+        - configMapRef:
+            name: atms-config
+        - secretRef:
+            name: atms-secrets
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: TF_FORCE_GPU_ALLOW_GROWTH
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - name: prediction-models
+          mountPath: /app/models
+        - name: prediction-config
+          mountPath: /app/config
+        - name: prediction-cache
+          mountPath: /app/cache
+      volumes:
+      - name: prediction-models
+        persistentVolumeClaim:
+          claimName: prediction-models-pvc
+      - name: prediction-config
+        configMap:
+          name: prediction-config
+      - name: prediction-cache
+        emptyDir: {}
+
+---
+# Service for Traffic Prediction
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-prediction
+  namespace: traffic-management-system
+  labels:
+    app: traffic-prediction
+    component: ai
+    part-of: atms
+spec:
+  selector:
+    app: traffic-prediction
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+  type: ClusterIP
+
+---
+# Computer Vision Service for Traffic Monitoring
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: computer-vision-service
+  namespace: traffic-management-system
+  labels:
+    app: computer-vision-service
+    component: ai
+    part-of: atms
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: computer-vision-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: computer-vision-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+      - name: computer-vision-service
+        image: atms/computer-vision:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9100
+          name: metrics
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+        envFrom:
+        - configMapRef:
+            name: atms-config
+        - secretRef:
+            name: atms-secrets
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - name: vision-models
+          mountPath: /app/models
+        - name: vision-config
+          mountPath: /app/config
+        - name: video-cache
+          mountPath: /app/video-cache
+        - name: shared-streams
+          mountPath: /app/shared-streams
+      volumes:
+      - name: vision-models
+        persistentVolumeClaim:
+          claimName: vision-models-pvc
+      - name: vision-config
+        configMap:
+          name: vision-config
+      - name: video-cache
+        emptyDir: {}
+      - name: shared-streams
+        persistentVolumeClaim:
+          claimName: shared-streams-pvc
+
+---
+# Service for Computer Vision
+apiVersion: v1
+kind: Service
+metadata:
+  name: computer-vision-service
+  namespace: traffic-management-system
+  labels:
+    app: computer-vision-service
+    component: ai
+    part-of: atms
+spec:
+  selector:
+    app: computer-vision-service
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+  type: ClusterIP
+
+---
+# Signal Control Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signal-control-service
+  namespace: traffic-management-system
+  labels:
+    app: signal-control-service
+    component: control
+    part-of: atms
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: signal-control-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: signal-control-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+      - name: signal-control-service
+        image: atms/signal-control:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9100
+          name: metrics
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        envFrom:
+        - configMapRef:
+            name: atms-config
+        - secretRef:
+            name: atms-secrets
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: signal-control-config
+          mountPath: /app/config
+        - name: optimization-models
+          mountPath: /app/optimization-models
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: signal-control-config
+        configMap:
+          name: signal-control-config
+      - name: optimization-models
+        persistentVolumeClaim:
+          claimName: optimization-models-pvc
+      - name: logs
+        emptyDir: {}
+
+---
+# Service for Signal Control
+apiVersion: v1
+kind: Service
+metadata:
+  name: signal-control-service
+  namespace: traffic-management-system
+  labels:
+    app: signal-control-service
+    component: control
+    part-of: atms
+spec:
+  selector:
+    app: signal-control-service
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+  type: ClusterIP
+
+---
+# Frontend Admin Dashboard Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-dashboard
+  namespace: traffic-management-system
+  labels:
+    app: admin-dashboard
+    component: frontend
+    part-of: atms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: admin-dashboard
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: admin-dashboard
+    spec:
+      containers:
+      - name: admin-dashboard
+        image: atms/admin-dashboard:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+        env:
+        - name: API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: atms-config
+              key: API_BASE_URL
+        - name: WEBSOCKET_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: atms-config
+              key: WEBSOCKET_BASE_URL
+        livenessProbe:
+          httpGet:
+            path: /health.html
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health.html
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+# Service for Admin Dashboard
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-dashboard
+  namespace: traffic-management-system
+  labels:
+    app: admin-dashboard
+    component: frontend
+    part-of: atms
+spec:
+  selector:
+    app: admin-dashboard
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  type: ClusterIP
+
+---
+# Ingress for Admin Dashboard
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin-dashboard-ingress
+  namespace: traffic-management-system
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - admin.traffic-management.example.com
+    secretName: admin-traffic-management-tls
+  rules:
+  - host: admin.traffic-management.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-dashboard
+            port:
+              name: http
+
+---
+# Operator Console Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator-console
+  namespace: traffic-management-system
+  labels:
+    app: operator-console
+    component: frontend
+    part-of: atms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: operator-console
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: operator-console
+    spec:
+      containers:
+      - name: operator-console
+        image: atms/operator-console:v2.5.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+        env:
+        - name: API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: atms-config
+              key: API_BASE_URL
+        - name: WEBSOCKET_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: atms-config
+              key: WEBSOCKET_BASE_URL
+        - name: MAP_PROVIDER_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: atms-config
+              key: MAP_PROVIDER_API_URL
+        - name: MAP_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: atms-secrets
+              key: API_KEY_MAPS
+        livenessProbe:
+          httpGet:
+            path: /health.html
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health.html
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+# Service for Operator Console
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-console
+  namespace: traffic-management-system
+  labels:
+    app: operator-console
+    component: frontend
+    part-of: atms
+spec:
+  selector:
+    app: operator-console
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  type: ClusterIP
+
+---
+# Ingress for Operator Console
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: operator-console-ingress
+  namespace: traffic-management-system
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - operator.traffic-management.example.com
+    secretName: operator-traffic-management-tls
+  rules:
+  - host: operator.traffic-management.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: operator-console
+            port:
+              name: http
+
+---
+# Persistent Volume Claims for various services
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traffic-models-pvc
+  namespace: traffic-management-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: managed-nfs
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prediction-models-pvc
+  namespace: traffic-management-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: managed-nfs
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vision-models-pvc
+  namespace: traffic-management-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: managed-nfs
+  resources:
+    requests:
+      storage: 30Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: optimization-models-pvc
+  namespace: traffic-management-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: managed-nfs
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-streams-pvc
+  namespace: traffic-management-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: managed-nfs
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# HorizontalPodAutoscaler for key services
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: traffic-core-engine-hpa
+  namespace: traffic-management-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: traffic-core-engine
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      - type: Percent
+        value: 50
+        periodSeconds: 30
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: traffic-management-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 4
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 60
+
+---
+# Network Policies for securing traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: traffic-management-system
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway
+  namespace: traffic-management-system
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          part-of: atms
+    ports:
+    - protocol: TCP
+
+---
+# Resource Quotas for namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: atms-resource-quota
+  namespace: traffic-management-system
+spec:
+  hard:
+    pods: "50"
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    persistentvolumeclaims: "20"
+    services: "30"
+    secrets: "20"
+    configmaps: "30"
+
+---
+# Pod Disruption Budget for critical services
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: traffic-core-engine-pdb
+  namespace: traffic-management-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: traffic-core-engine
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: signal-control-service-pdb
+  namespace: traffic-management-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: signal-control-service
