@@ -1,0 +1,486 @@
+version: '3.9'
+
+services:
+  # Core Traffic Engine - Rust-based high-performance computing service
+  core-engine:
+    build:
+      context: ./backend/core-engine
+      dockerfile: Dockerfile
+    container_name: atms-core-engine
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/traffic_management
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SENSOR_DATA_PATH=/data/sensors
+      - TRAFFIC_MODEL_PATH=/models/traffic
+      - POD_NAME=dev-core-engine
+      - POD_NAMESPACE=dev
+    volumes:
+      - ./backend/core-engine:/app
+      - traffic_models:/models
+      - sensor_data:/data/sensors
+    ports:
+      - "8001:8080"
+    depends_on:
+      - db
+      - redis
+      - kafka
+    networks:
+      - atms-network
+      - atms-db-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # API Gateway - Go-based API gateway with routing and auth
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+      dockerfile: Dockerfile
+    container_name: atms-api-gateway
+    restart: unless-stopped
+    environment:
+      - GO_ENV=development
+      - PORT=8080
+      - CORE_ENGINE_URL=http://core-engine:8080
+      - PREDICTION_SERVICE_URL=http://prediction-service:8080
+      - COMPUTER_VISION_URL=http://computer-vision:8080
+      - SIGNAL_CONTROL_URL=http://signal-control:8080
+      - JWT_SECRET=dev_jwt_secret_key_replace_in_production
+      - JWT_EXPIRATION=86400
+      - LOG_LEVEL=debug
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./backend/api-gateway:/app
+    ports:
+      - "8000:8080"
+    depends_on:
+      - core-engine
+      - prediction-service
+      - computer-vision
+      - signal-control
+      - redis
+    networks:
+      - atms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Traffic Prediction Service - Python/ML based prediction service
+  prediction-service:
+    build:
+      context: ./ml/prediction-service
+      dockerfile: Dockerfile
+    container_name: atms-prediction
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - MODEL_PATH=/models/prediction
+      - DATA_PATH=/data/traffic
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/traffic_management
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - BATCH_SIZE=32
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - WORKERS=4
+    ports:
+      - "8002:8080"
+    volumes:
+      - ./ml/prediction-service:/app
+      - prediction_models:/models/prediction
+      - traffic_data:/data/traffic
+    depends_on:
+      - db
+      - redis
+      - kafka
+    networks:
+      - atms-network
+      - atms-db-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Computer Vision Service - Python/ML based computer vision processing
+  computer-vision:
+    build:
+      context: ./ml/computer-vision
+      dockerfile: Dockerfile
+    container_name: atms-computer-vision
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - MODEL_PATH=/models/vision
+      - VIDEO_STREAM_PATH=/data/video_streams
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - WORKERS=4
+      - DETECTOR_CONFIDENCE_THRESHOLD=0.5
+      - MAX_CONCURRENT_STREAMS=8
+    ports:
+      - "8003:8080"
+    volumes:
+      - ./ml/computer-vision:/app
+      - vision_models:/models/vision
+      - video_streams:/data/video_streams
+    depends_on:
+      - redis
+      - kafka
+    networks:
+      - atms-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Signal Control Service - Go-based service for traffic signal control
+  signal-control:
+    build:
+      context: ./backend/signal-control
+      dockerfile: Dockerfile
+    container_name: atms-signal-control
+    restart: unless-stopped
+    environment:
+      - GO_ENV=development
+      - PORT=8080
+      - CORE_ENGINE_URL=http://core-engine:8080
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/traffic_management
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - LOG_LEVEL=debug
+      - OPTIMIZATION_MODEL_PATH=/models/optimization
+      - SIGNAL_CONTROL_INTERVAL_MS=1000
+    ports:
+      - "8004:8080"
+    volumes:
+      - ./backend/signal-control:/app
+      - optimization_models:/models/optimization
+    depends_on:
+      - core-engine
+      - db
+      - redis
+      - kafka
+    networks:
+      - atms-network
+      - atms-db-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Admin Dashboard Frontend - React-based admin UI
+  admin-dashboard:
+    build:
+      context: ./frontend/admin-dashboard
+      dockerfile: Dockerfile.dev
+    container_name: atms-admin-dashboard
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000/ws
+      - REACT_APP_DASHBOARD_REFRESH_INTERVAL=5000
+      - REACT_APP_MAPBOX_TOKEN=your_mapbox_dev_token
+    volumes:
+      - ./frontend/admin-dashboard:/app
+      - node_modules_admin:/app/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - atms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Operator Console Frontend - Vue.js-based operator console
+  operator-console:
+    build:
+      context: ./frontend/operator-console
+      dockerfile: Dockerfile.dev
+    container_name: atms-operator-console
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - VUE_APP_API_URL=http://localhost:8000
+      - VUE_APP_WS_URL=ws://localhost:8000/ws
+      - VUE_APP_CONSOLE_REFRESH_INTERVAL=2000
+      - VUE_APP_MAPBOX_TOKEN=your_mapbox_dev_token
+    volumes:
+      - ./frontend/operator-console:/app
+      - node_modules_operator:/app/node_modules
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - atms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # PostgreSQL Database
+  db:
+    image: postgres:14-alpine
+    container_name: atms-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=traffic_management
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - atms-db-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: atms-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - atms-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # Kafka for event streaming
+  kafka:
+    image: bitnami/kafka:3.5
+    container_name: atms-kafka
+    restart: unless-stopped
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@atms-kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    networks:
+      - atms-network
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Prometheus monitoring
+  prometheus:
+    image: prom/prometheus:v2.43.0
+    container_name: atms-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - atms-monitoring
+    profiles: ["monitoring"]
+    depends_on:
+      - core-engine
+      - api-gateway
+      - prediction-service
+      - computer-vision
+      - signal-control
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:9.5.1
+    container_name: atms-grafana
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3100:3000"
+    networks:
+      - atms-monitoring
+    profiles: ["monitoring"]
+    depends_on:
+      - prometheus
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.44
+    container_name: atms-jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=9411
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14250:14250"
+      - "14268:14268"
+      - "14269:14269"
+      - "9411:9411"
+    networks:
+      - atms-monitoring
+    profiles: ["monitoring"]
+
+  # MinIO for object storage
+  minio:
+    image: minio/minio:RELEASE.2023-05-04T21-44-30Z
+    container_name: atms-minio
+    restart: unless-stopped
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - atms-network
+    profiles: ["storage"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+  # Traffic Data Simulator for development
+  traffic-simulator:
+    build:
+      context: ./tools/traffic-simulator
+      dockerfile: Dockerfile
+    container_name: atms-traffic-simulator
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/traffic_management
+      - SIMULATOR_MODE=realistic
+      - SIMULATION_SPEED=1.0
+      - SENSOR_COUNT=100
+      - VEHICLE_COUNT=5000
+      - TRAFFIC_SIGNAL_COUNT=50
+      - SIMULATION_AREA=city_center
+      - UPDATE_INTERVAL_MS=500
+    volumes:
+      - ./tools/traffic-simulator:/app
+      - simulation_data:/data/simulation
+    depends_on:
+      - kafka
+      - db
+    networks:
+      - atms-network
+      - atms-db-network
+    profiles: ["simulation"]
+
+  # Adminer for database management
+  adminer:
+    image: adminer:4.8.1
+    container_name: atms-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=db
+    networks:
+      - atms-db-network
+    profiles: ["dev"]
+    depends_on:
+      - db
+
+networks:
+  atms-network:
+    driver: bridge
+  atms-db-network:
+    driver: bridge
+  atms-monitoring:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:
+  traffic_models:
+  prediction_models:
+  vision_models:
+  optimization_models:
+  sensor_data:
+  traffic_data:
+  video_streams:
+  simulation_data:
+  node_modules_admin:
+  node_modules_operator:
+  prometheus_data:
+  grafana_data:
+  minio_data:
