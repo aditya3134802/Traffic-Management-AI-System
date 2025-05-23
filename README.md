@@ -1,7 +1,7 @@
 # Advanced Traffic Management System (ATMS)
 
 <div align="center">
-  <img src="docs/assets/atms-logo.png" alt="ATMS Logo" width="300"/>
+  <img src="/Internal storage/Download/Ability_Traffic Mgr_Intel_s.jpg"/>
   <br>
   <h3>🚦 Next-Generation Intelligent Traffic Management Platform 🚦</h3>
   <p>Transforming urban mobility through AI-powered predictive analytics and real-time control</p>
